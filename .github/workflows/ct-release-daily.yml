@@ -1,0 +1,100 @@
+name: CT Release Checklist
+
+on:
+  schedule:
+    # Runs every day at 09:00 UTC
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 2.1.13) — overrides CT_RELEASE_VERSION variable'
+        required: false
+      date_release_build:
+        description: 'Build date (e.g. 20260303) — overrides CT_BUILD_DATE variable'
+        required: false
+
+jobs:
+  checklist:
+    name: Run CT Release Checklist
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ct-release-checklist/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ct-release-checklist
+        run: npm ci
+
+      - name: Run checklist
+        id: run
+        working-directory: ct-release-checklist
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TEST_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TEST_AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          CT_VERSION: ${{ inputs.version || vars.CT_RELEASE_VERSION }}
+          CT_BUILD_DATE: ${{ inputs.date_release_build || vars.CT_BUILD_DATE }}
+        run: |
+          if node run-checklist.mjs > /tmp/checklist-output.txt 2>&1; then
+            echo "status=passed" >> "$GITHUB_OUTPUT"
+          else
+            EXIT=$?
+            if [ $EXIT -eq 2 ]; then
+              echo "status=config_error" >> "$GITHUB_OUTPUT"
+            else
+              echo "status=failed" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+          cat /tmp/checklist-output.txt
+
+      - name: Send Slack notification
+        if: always()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.TEST_SLACK_BOT_TOKEN }}
+          STATUS: ${{ steps.run.outputs.status }}
+          VERSION: ${{ inputs.version || vars.CT_RELEASE_VERSION }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          pip install slack_sdk -q
+          python3 - <<'EOF'
+          import os
+          from slack_sdk import WebClient
+          from slack_sdk.errors import SlackApiError
+
+          try:
+              with open("/tmp/checklist-output.txt") as f:
+                  report = f.read(2800)
+          except FileNotFoundError:
+              report = "(no output)"
+
+          status  = os.environ.get("STATUS", "unknown")
+          version = os.environ.get("VERSION", "unknown")
+          run_url = os.environ.get("RUN_URL", "")
+
+          headlines = {
+              "passed":       "✅ All checks passed",
+              "failed":       "❌ Some checks FAILED — review before releasing",
+              "config_error": "⚠️ Configuration error — CT_RELEASE_VERSION or CT_BUILD_DATE not set",
+          }
+          headline = headlines.get(status, "❓ Unknown status")
+
+          text = (
+              f"*CT Release Checklist — {headline}*\n"
+              f"Version: `{version}`\n\n"
+              f"```\n{report}\n```\n"
+              f"<{run_url}|View run>"
+          )
+
+          client = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
+          try:
+              client.chat_postMessage(channel="dimensions-k8s-alerts", text=text)
+          except SlackApiError as e:
+              print(f"Slack error: {e.response['error']}")
+              raise
+          EOF
