@@ -1,9 +1,9 @@
 name: CT Incremental Updates Checklist
 
 on:
-  schedule:
-    # Runs every day at 09:00 UTC
-    - cron: '0 9 * * *'
+  # schedule:
+  #   # Runs every day at 09:00 UTC
+  #   - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       version:
